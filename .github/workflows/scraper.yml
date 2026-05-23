@@ -1,0 +1,42 @@
+name: 🤖 Job Scraper
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: 🐍 Ustaw Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Zainstaluj zależności
+        run: pip install requests beautifulsoup4
+
+      - name: 🔒 Wstrzyknij dane proxy
+        run: |
+          sed -i "s/TWOJ_LOGIN/${{ secrets.PROXY_USERNAME }}/g" scraper.py
+          sed -i "s/TWOJE_HASLO/${{ secrets.PROXY_PASSWORD }}/g" scraper.py
+
+      - name: 🚀 Uruchom scraper
+        run: python scraper.py
+
+      - name: 📤 Wyślij wyniki do aplikacji
+        run: |
+          python send_to_app.py --today --url "${{ secrets.WEBHOOK_URL }}"
+        continue-on-error: true
+
+      - name: 📁 Zapisz wyniki jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobs-${{ github.run_number }}
+          path: output/
+          retention-days: 30
