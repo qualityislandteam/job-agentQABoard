@@ -25,7 +25,9 @@ except ImportError:
 # KONFIGURACJA
 # ============================================================
 CONFIG = {
-    "keyword": "test",
+    "keyword": "test",  # wysyłane do API JustJoinIT
+    "filter_keywords": ["test", "qa", "sdet"],
+    "filter_enabled": True,
     "location": "",
     "min_salary": None,
     "output_dir": "output",
@@ -413,12 +415,16 @@ def scrape_pracujpl(keyword, seen):
 # FILTROWANIE
 # ============================================================
 def filter_jobs(jobs):
+    if not CONFIG.get("filter_enabled", True):
+        log.info(f"Filtr wyłączony – zwracam wszystkie {len(jobs)} ofert")
+        return jobs
+    keywords = [k.lower() for k in CONFIG.get("filter_keywords", [CONFIG["keyword"]])]
     filtered = []
-    kw = CONFIG["keyword"].lower()
     for j in jobs:
-        title_match = kw in j.get("title", "").lower()
-        tech_match = any(kw in t.lower() for t in j.get("technologies", []) if isinstance(t, str))
-        if title_match or tech_match:
+        title = j.get("title", "").lower()
+        techs = " ".join(t.lower() for t in j.get("technologies", []) if isinstance(t, str))
+        text = title + " " + techs
+        if any(kw in text for kw in keywords):
             filtered.append(j)
     log.info(f"Po filtracji: {len(filtered)} ofert (było {len(jobs)})")
     return filtered
