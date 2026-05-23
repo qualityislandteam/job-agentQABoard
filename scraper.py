@@ -25,16 +25,16 @@ except ImportError:
 # KONFIGURACJA
 # ============================================================
 CONFIG = {
-    "keyword": "test",  # wysyłane do API JustJoinIT
-    "filter_keywords": ["test", "qa", "sdet"],
-    "filter_enabled": True,
+    "keyword": "test",                          # wysyłane do API serwisów
+    "filter_keywords": ["test", "qa", "sdet"],  # filtr lokalny tytułów
+    "filter_enabled": True,                     # False = zapisuj wszystkie bez filtra
     "location": "",
     "min_salary": None,
     "output_dir": "output",
     "seen_file": "seen_jobs.json",
     "log_file": "agent.log",
     "delay_between_requests": 2,
-    "sources": ["nofluffjobs", "justjoinit", "pracujpl"],
+    "sources": ["justjoinit", "nofluffjobs", "pracujpl"],
     "max_pages": 20,
     "stop_on_seen": True,
 }
@@ -180,8 +180,6 @@ def scrape_justjoinit(keyword, seen):
 
         try:
             data = resp.json()
-
-            # Obsłuż różne formaty odpowiedzi
             if isinstance(data, list):
                 offers = data
                 total_pages = 1
@@ -201,23 +199,16 @@ def scrape_justjoinit(keyword, seen):
             for o in offers:
                 if not isinstance(o, dict):
                     continue
-
-                # Salary
                 salary = None
                 salary_ranges = o.get("salaryRanges", [])
                 if isinstance(salary_ranges, list) and salary_ranges:
                     sr = salary_ranges[0]
                     if isinstance(sr, dict):
                         salary = f"{sr.get('from','')}–{sr.get('to','')} {sr.get('currency','PLN')} ({sr.get('employmentType','')})"
-
-                # Technologies
                 skills = o.get("requiredSkills", [])
-                technologies = [sk.get("name","") for sk in skills if isinstance(sk, dict)]
-
-                # Location
+                technologies = [sk.get("name", "") for sk in skills if isinstance(sk, dict)]
                 workplace = o.get("workplaceType", [])
                 location = o.get("city", "") or (", ".join(workplace) if isinstance(workplace, list) else "")
-
                 job = {
                     "source": "justjoinit",
                     "title": o.get("title", ""),
@@ -235,12 +226,10 @@ def scrape_justjoinit(keyword, seen):
                 all_jobs.append(job)
 
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  JustJoinIT – same znane oferty, zatrzymuję")
+                log.info("  JustJoinIT – same znane oferty, zatrzymuję")
                 break
-
             if page >= total_pages:
                 break
-
             page += 1
             time.sleep(CONFIG["delay_between_requests"])
 
@@ -262,21 +251,17 @@ def scrape_nofluffjobs(keyword, seen):
 
     while page <= CONFIG["max_pages"]:
         log.info(f"  NoFluffJobs strona {page}...")
-        # Nowy format API NoFluffJobs
-        resp = fetch(
-            "https://nofluffjobs.com/api/search/posting",
-            method="POST",
-            json_body={
-                "criteriaSearch": {
-                    "keyword": keyword,
-                    "country": "Poland",
-                },
-                "page": page,
-                "pageSize": 100,
-                "region": "pl",
-            },
-        )
-        if not resp:
+        # Próbuj różnych formatów zapytania
+        for payload in [
+            {"criteriaSearch": {"keyword": keyword, "country": "Poland"}, "page": page, "pageSize": 100},
+            {"criteriaSearch": {"more": {"keyword": keyword}}, "page": page, "pageSize": 100, "region": "pl"},
+            {"page": page, "pageSize": 100, "region": "pl", "keyword": keyword},
+        ]:
+            resp = fetch("https://nofluffjobs.com/api/search/posting", method="POST", json_body=payload)
+            if resp and resp.status_code == 200:
+                break
+        else:
+            log.error("NoFluffJobs – wszystkie formaty zapytania nieudane")
             break
 
         try:
@@ -294,14 +279,12 @@ def scrape_nofluffjobs(keyword, seen):
                 sal = p.get("salary")
                 if isinstance(sal, dict):
                     salary = f"{sal.get('from','')}–{sal.get('to','')} {sal.get('currency','PLN')}"
-
                 loc_data = p.get("location", {})
                 location = "Polska"
                 if isinstance(loc_data, dict):
                     places = loc_data.get("places", [])
                     if places and isinstance(places[0], dict):
                         location = places[0].get("city", "Polska")
-
                 job = {
                     "source": "nofluffjobs",
                     "title": p.get("title", ""),
@@ -319,13 +302,11 @@ def scrape_nofluffjobs(keyword, seen):
                 all_jobs.append(job)
 
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  NoFluffJobs – same znane oferty, zatrzymuję")
+                log.info("  NoFluffJobs – same znane oferty, zatrzymuję")
                 break
-
             total = data.get("totalCount", 0)
             if page * 100 >= total:
                 break
-
             page += 1
             time.sleep(CONFIG["delay_between_requests"])
 
@@ -345,18 +326,36 @@ def scrape_pracujpl(keyword, seen):
     all_jobs = []
     page = 1
 
+    # Pracuj.pl wymaga dodatkowych nagłówków żeby nie blokować
+    pracuj_headers = {
+        "Referer": "https://www.pracuj.pl/",
+        "Origin": "https://www.pracuj.pl",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    }
+
     while page <= CONFIG["max_pages"]:
         log.info(f"  Pracuj.pl strona {page}...")
-        resp = fetch(
-            "https://massachusetts.pracuj.pl/jobOffers/listing",
-            params={"q": keyword, "pn": page},
-        )
+        # Próbuj różnych endpointów Pracuj.pl
+        resp = None
+        for url in [
+            f"https://massachusetts.pracuj.pl/jobOffers/listing?q={urllib.parse.quote(keyword)}&pn={page}",
+            f"https://api.pracuj.pl/jobOffers/listing?q={urllib.parse.quote(keyword)}&pn={page}",
+            f"https://pracuj.pl/praca/{urllib.parse.quote(keyword)};kw/polska;ct,1?pn={page}&format=json",
+        ]:
+            resp = fetch(url, extra_headers=pracuj_headers)
+            if resp and resp.status_code == 200:
+                log.info(f"  Pracuj.pl – działa endpoint: {url[:60]}")
+                break
+
         if not resp:
+            log.error("Pracuj.pl – wszystkie endpointy zablokowane (403). Pomijam.")
             break
 
         try:
             data = resp.json()
-            offers_raw = data.get("groupedOffers", [])
+            offers_raw = data.get("groupedOffers", data.get("offers", []))
             if not offers_raw:
                 log.info("  Pracuj.pl – brak ofert na stronie")
                 break
@@ -365,26 +364,25 @@ def scrape_pracujpl(keyword, seen):
             for group in offers_raw:
                 if not isinstance(group, dict):
                     continue
-                for o in group.get("offers", [group]):
+                items = group.get("offers", [group])
+                for o in items:
                     if not isinstance(o, dict):
                         continue
-                    salary_match = o.get("salaryMatch", {})
+                    salary_match = o.get("salaryMatch", o.get("salary", {}))
                     salary = None
                     if isinstance(salary_match, dict) and salary_match:
                         salary = f"{salary_match.get('from','')}–{salary_match.get('to','')} {salary_match.get('currency','PLN')}"
-
                     workplace = o.get("jobWorkplace", {})
                     location = workplace.get("workplaceCityName", "") if isinstance(workplace, dict) else ""
-
                     job = {
                         "source": "pracujpl",
-                        "title": o.get("jobTitle", ""),
+                        "title": o.get("jobTitle", o.get("title", "")),
                         "company": o.get("companyName", ""),
                         "location": location,
                         "remote": o.get("remoteWork", False),
                         "salary": salary,
                         "technologies": [],
-                        "url": o.get("offerAbsoluteUri", ""),
+                        "url": o.get("offerAbsoluteUri", o.get("url", "")),
                         "published_at": o.get("lastPublicated", ""),
                         "scraped_at": datetime.now().isoformat(),
                     }
@@ -393,13 +391,11 @@ def scrape_pracujpl(keyword, seen):
                     all_jobs.append(job)
 
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  Pracuj.pl – same znane oferty, zatrzymuję")
+                log.info("  Pracuj.pl – same znane oferty, zatrzymuję")
                 break
-
             total_pages = data.get("totalPages", 1)
             if page >= total_pages:
                 break
-
             page += 1
             time.sleep(CONFIG["delay_between_requests"])
 
@@ -434,7 +430,7 @@ def filter_jobs(jobs):
 # ============================================================
 def run():
     log.info("=" * 60)
-    log.info(f"🚀 Agent startuje | keyword='{CONFIG['keyword']}'")
+    log.info(f"🚀 Agent startuje | keyword='{CONFIG['keyword']}' | filtry: {CONFIG['filter_keywords']}")
     proxy_status = f"{PROXY['host']}:{PROXY['port']}" if PROXY["enabled"] else "wyłączone"
     log.info(f"🔒 Proxy: {proxy_status}")
     log.info("=" * 60)
