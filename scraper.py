@@ -33,27 +33,22 @@ CONFIG = {
     "log_file": "agent.log",
     "delay_between_requests": 2,
     "sources": ["nofluffjobs", "justjoinit", "pracujpl"],
-    "max_pages": 20,          # max stron na serwis (20 × 100 = 2000 ofert)
-    "stop_on_seen": True,     # zatrzymaj paginację gdy trafisz na już znane oferty
+    "max_pages": 20,
+    "stop_on_seen": True,
 }
 
 # ============================================================
-# KONFIGURACJA PROXY (Webshare)
+# PROXY (Webshare)
 # ============================================================
 PROXY = {
     "enabled": True,
     "host": "p.webshare.io",
     "port": 80,
-    # ← wstaw tutaj swoje dane z dashboardu Webshare:
-    "username": "TWOJ_LOGIN",       # np. fnmfdsyy-pl-19
-    "password": "TWOJE_HASLO",      # np. ivpwlsgwnra0
-    # Rotating: każdy request dostaje inne IP automatycznie
-    # Możesz też użyć kraju: fnmfdsyy-pl-19 = Poland
-    # Lub losowe IP:         fnmfdsyy-rotate
+    "username": "TWOJ_LOGIN",
+    "password": "TWOJE_HASLO",
 }
 
-def get_proxies() -> dict | None:
-    """Zwraca dict proxy dla requests lub None gdy wyłączone."""
+def get_proxies():
     if not PROXY["enabled"]:
         return None
     proxy_url = (
@@ -69,10 +64,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
 ]
 
-def get_headers(extra: dict = None) -> dict:
+def get_headers(extra=None):
     h = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
@@ -99,33 +93,23 @@ def setup_logger():
 log = setup_logger()
 
 # ============================================================
-# HELPERS
+# FETCH
 # ============================================================
 def fetch(url, params=None, method="GET", json_body=None, extra_headers=None):
-    """HTTP request z proxy, retry i losowym User-Agent."""
     if params and method == "GET":
         url = url + "?" + urllib.parse.urlencode(params)
-
     proxies = get_proxies()
     headers = get_headers(extra_headers)
-
     for attempt in range(3):
         try:
             if HAS_REQUESTS:
                 if method == "POST":
-                    r = requests.post(
-                        url, json=json_body, headers=headers,
-                        proxies=proxies, timeout=20
-                    )
+                    r = requests.post(url, json=json_body, headers=headers, proxies=proxies, timeout=20)
                 else:
-                    r = requests.get(
-                        url, headers=headers,
-                        proxies=proxies, timeout=20
-                    )
+                    r = requests.get(url, headers=headers, proxies=proxies, timeout=20)
                 r.raise_for_status()
                 return r
             else:
-                # fallback bez proxy (stdlib nie wspiera proxy auth łatwo)
                 req = urllib.request.Request(url, headers=headers)
                 if method == "POST" and json_body:
                     req.data = json.dumps(json_body).encode()
@@ -141,31 +125,28 @@ def fetch(url, params=None, method="GET", json_body=None, extra_headers=None):
                     return FR(resp.read(), resp.status)
         except Exception as e:
             wait = 2 ** attempt + random.uniform(0, 1)
-            log.warning(f"Attempt {attempt+1}/3 failed [{url[:60]}]: {e} — retry za {wait:.1f}s")
+            log.warning(f"Attempt {attempt+1}/3 failed [{url[:70]}]: {e} — retry za {wait:.1f}s")
             time.sleep(wait)
     log.error(f"Wszystkie próby nieudane: {url[:80]}")
     return None
 
 
-def job_id(job: dict) -> str:
+def job_id(job):
     key = f"{job.get('source','')}{job.get('url','')}{job.get('title','')}"
     return hashlib.md5(key.encode()).hexdigest()
 
-
-def load_seen() -> set:
+def load_seen():
     p = Path(CONFIG["seen_file"])
     if p.exists():
         return set(json.loads(p.read_text(encoding="utf-8")))
     return set()
 
-
-def save_seen(seen: set):
+def save_seen(seen):
     Path(CONFIG["seen_file"]).write_text(
         json.dumps(list(seen), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-
-def save_results(jobs: list):
+def save_results(jobs):
     Path(CONFIG["output_dir"]).mkdir(exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
     out_path = Path(CONFIG["output_dir"]) / f"jobs_{date_str}.json"
@@ -173,73 +154,88 @@ def save_results(jobs: list):
     if out_path.exists():
         existing = json.loads(out_path.read_text(encoding="utf-8"))
     existing.extend(jobs)
-    out_path.write_text(
-        json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"Zapisano {len(jobs)} nowych ofert → {out_path}")
     return out_path
 
-
 # ============================================================
-# SCRAPERS Z PAGINACJĄ
+# JUSTJOINIT
 # ============================================================
-
-def scrape_justjoinit(keyword: str, seen: set) -> list:
-    log.info("🔍 JustJoinIT – pobieranie ofert (wszystkie strony)...")
+def scrape_justjoinit(keyword, seen):
+    log.info("🔍 JustJoinIT – pobieranie ofert...")
     all_jobs = []
     page = 1
-    max_pages = CONFIG["max_pages"]
-    extra_h = {"Version": "2"}
 
-    while page <= max_pages:
-        log.info(f"  JustJoinIT strona {page}/{max_pages}...")
+    while page <= CONFIG["max_pages"]:
+        log.info(f"  JustJoinIT strona {page}...")
         resp = fetch(
             "https://api.justjoin.it/v2/user-panel/offers",
             params={"searchTitle": keyword, "page": page, "pageSize": 100, "sortBy": "newest"},
-            extra_headers=extra_h,
+            extra_headers={"Version": "2"},
         )
         if not resp:
             break
 
         try:
             data = resp.json()
-            offers = data.get("data", [])
+
+            # Obsłuż różne formaty odpowiedzi
+            if isinstance(data, list):
+                offers = data
+                total_pages = 1
+            elif isinstance(data, dict):
+                offers = data.get("data", [])
+                meta = data.get("meta", {})
+                total_pages = meta.get("totalPages", 1) if isinstance(meta, dict) else 1
+            else:
+                log.error(f"JustJoinIT – nieoczekiwany format: {type(data)}")
+                break
+
             if not offers:
-                log.info("  JustJoinIT – brak kolejnych ofert")
+                log.info("  JustJoinIT – brak ofert na stronie")
                 break
 
             new_on_page = 0
             for o in offers:
-                salary_ranges = o.get("salaryRanges", [])
+                if not isinstance(o, dict):
+                    continue
+
+                # Salary
                 salary = None
-                if salary_ranges:
-                    s = salary_ranges[0]
-                    salary = f"{s.get('from','')}–{s.get('to','')} {s.get('currency','PLN')} ({s.get('employmentType','')})"
+                salary_ranges = o.get("salaryRanges", [])
+                if isinstance(salary_ranges, list) and salary_ranges:
+                    sr = salary_ranges[0]
+                    if isinstance(sr, dict):
+                        salary = f"{sr.get('from','')}–{sr.get('to','')} {sr.get('currency','PLN')} ({sr.get('employmentType','')})"
+
+                # Technologies
+                skills = o.get("requiredSkills", [])
+                technologies = [sk.get("name","") for sk in skills if isinstance(sk, dict)]
+
+                # Location
+                workplace = o.get("workplaceType", [])
+                location = o.get("city", "") or (", ".join(workplace) if isinstance(workplace, list) else "")
 
                 job = {
                     "source": "justjoinit",
                     "title": o.get("title", ""),
                     "company": o.get("companyName", ""),
-                    "location": o.get("city", "") or ", ".join(o.get("workplaceType", [])),
-                    "remote": o.get("workplaceType", ""),
+                    "location": location,
+                    "remote": workplace if isinstance(workplace, list) else [],
                     "salary": salary,
-                    "technologies": [s.get("name") for s in o.get("requiredSkills", [])],
+                    "technologies": technologies,
                     "url": f"https://justjoin.it/offers/{o.get('slug', '')}",
                     "published_at": o.get("publishedAt", ""),
                     "scraped_at": datetime.now().isoformat(),
                 }
-                jid = job_id(job)
-                if jid not in seen:
+                if job_id(job) not in seen:
                     new_on_page += 1
                 all_jobs.append(job)
 
-            # Jeśli cała strona to już znane oferty — stop
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  JustJoinIT – strona {page} to same znane oferty, zatrzymuję")
+                log.info(f"  JustJoinIT – same znane oferty, zatrzymuję")
                 break
 
-            meta = data.get("meta", {})
-            total_pages = meta.get("totalPages", 1)
             if page >= total_pages:
                 break
 
@@ -248,25 +244,31 @@ def scrape_justjoinit(keyword: str, seen: set) -> list:
 
         except Exception as e:
             log.error(f"JustJoinIT strona {page} – błąd: {e}")
+            import traceback; log.error(traceback.format_exc())
             break
 
-    log.info(f"JustJoinIT – łącznie {len(all_jobs)} ofert z {page} stron")
+    log.info(f"JustJoinIT – łącznie {len(all_jobs)} ofert")
     return all_jobs
 
-
-def scrape_nofluffjobs(keyword: str, seen: set) -> list:
-    log.info("🔍 NoFluffJobs – pobieranie ofert (wszystkie strony)...")
+# ============================================================
+# NOFLUFFJOBS
+# ============================================================
+def scrape_nofluffjobs(keyword, seen):
+    log.info("🔍 NoFluffJobs – pobieranie ofert...")
     all_jobs = []
     page = 1
-    max_pages = CONFIG["max_pages"]
 
-    while page <= max_pages:
-        log.info(f"  NoFluffJobs strona {page}/{max_pages}...")
+    while page <= CONFIG["max_pages"]:
+        log.info(f"  NoFluffJobs strona {page}...")
+        # Nowy format API NoFluffJobs
         resp = fetch(
             "https://nofluffjobs.com/api/search/posting",
             method="POST",
             json_body={
-                "criteriaSearch": {"requirement": [keyword]},
+                "criteriaSearch": {
+                    "keyword": keyword,
+                    "country": "Poland",
+                },
                 "page": page,
                 "pageSize": 100,
                 "region": "pl",
@@ -279,38 +281,43 @@ def scrape_nofluffjobs(keyword: str, seen: set) -> list:
             data = resp.json()
             postings = data.get("postings", [])
             if not postings:
-                log.info("  NoFluffJobs – brak kolejnych ofert")
+                log.info("  NoFluffJobs – brak ofert na stronie")
                 break
 
             new_on_page = 0
             for p in postings:
+                if not isinstance(p, dict):
+                    continue
                 salary = None
                 sal = p.get("salary")
-                if sal:
+                if isinstance(sal, dict):
                     salary = f"{sal.get('from','')}–{sal.get('to','')} {sal.get('currency','PLN')}"
+
+                loc_data = p.get("location", {})
+                location = "Polska"
+                if isinstance(loc_data, dict):
+                    places = loc_data.get("places", [])
+                    if places and isinstance(places[0], dict):
+                        location = places[0].get("city", "Polska")
 
                 job = {
                     "source": "nofluffjobs",
                     "title": p.get("title", ""),
                     "company": p.get("name", ""),
-                    "location": (
-                        p.get("location", {}).get("places", [{}])[0].get("city", "Polska")
-                        if p.get("location") else "Polska"
-                    ),
-                    "remote": p.get("location", {}).get("fullyRemote", False),
+                    "location": location,
+                    "remote": loc_data.get("fullyRemote", False) if isinstance(loc_data, dict) else False,
                     "salary": salary,
                     "technologies": p.get("technology", []),
                     "url": f"https://nofluffjobs.com/pl/job/{p.get('url', '')}",
                     "published_at": p.get("posted", ""),
                     "scraped_at": datetime.now().isoformat(),
                 }
-                jid = job_id(job)
-                if jid not in seen:
+                if job_id(job) not in seen:
                     new_on_page += 1
                 all_jobs.append(job)
 
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  NoFluffJobs – strona {page} to same znane oferty, zatrzymuję")
+                log.info(f"  NoFluffJobs – same znane oferty, zatrzymuję")
                 break
 
             total = data.get("totalCount", 0)
@@ -322,20 +329,22 @@ def scrape_nofluffjobs(keyword: str, seen: set) -> list:
 
         except Exception as e:
             log.error(f"NoFluffJobs strona {page} – błąd: {e}")
+            import traceback; log.error(traceback.format_exc())
             break
 
-    log.info(f"NoFluffJobs – łącznie {len(all_jobs)} ofert z {page} stron")
+    log.info(f"NoFluffJobs – łącznie {len(all_jobs)} ofert")
     return all_jobs
 
-
-def scrape_pracujpl(keyword: str, seen: set) -> list:
-    log.info("🔍 Pracuj.pl – pobieranie ofert (wszystkie strony)...")
+# ============================================================
+# PRACUJPL
+# ============================================================
+def scrape_pracujpl(keyword, seen):
+    log.info("🔍 Pracuj.pl – pobieranie ofert...")
     all_jobs = []
     page = 1
-    max_pages = CONFIG["max_pages"]
 
-    while page <= max_pages:
-        log.info(f"  Pracuj.pl strona {page}/{max_pages}...")
+    while page <= CONFIG["max_pages"]:
+        log.info(f"  Pracuj.pl strona {page}...")
         resp = fetch(
             "https://massachusetts.pracuj.pl/jobOffers/listing",
             params={"q": keyword, "pn": page},
@@ -347,25 +356,29 @@ def scrape_pracujpl(keyword: str, seen: set) -> list:
             data = resp.json()
             offers_raw = data.get("groupedOffers", [])
             if not offers_raw:
-                log.info("  Pracuj.pl – brak kolejnych ofert")
+                log.info("  Pracuj.pl – brak ofert na stronie")
                 break
 
             new_on_page = 0
             for group in offers_raw:
+                if not isinstance(group, dict):
+                    continue
                 for o in group.get("offers", [group]):
+                    if not isinstance(o, dict):
+                        continue
                     salary_match = o.get("salaryMatch", {})
                     salary = None
-                    if salary_match:
-                        salary = (
-                            f"{salary_match.get('from','')}–"
-                            f"{salary_match.get('to','')} "
-                            f"{salary_match.get('currency','PLN')}"
-                        )
+                    if isinstance(salary_match, dict) and salary_match:
+                        salary = f"{salary_match.get('from','')}–{salary_match.get('to','')} {salary_match.get('currency','PLN')}"
+
+                    workplace = o.get("jobWorkplace", {})
+                    location = workplace.get("workplaceCityName", "") if isinstance(workplace, dict) else ""
+
                     job = {
                         "source": "pracujpl",
                         "title": o.get("jobTitle", ""),
                         "company": o.get("companyName", ""),
-                        "location": o.get("jobWorkplace", {}).get("workplaceCityName", ""),
+                        "location": location,
                         "remote": o.get("remoteWork", False),
                         "salary": salary,
                         "technologies": [],
@@ -373,13 +386,12 @@ def scrape_pracujpl(keyword: str, seen: set) -> list:
                         "published_at": o.get("lastPublicated", ""),
                         "scraped_at": datetime.now().isoformat(),
                     }
-                    jid = job_id(job)
-                    if jid not in seen:
+                    if job_id(job) not in seen:
                         new_on_page += 1
                     all_jobs.append(job)
 
             if CONFIG["stop_on_seen"] and new_on_page == 0 and page > 1:
-                log.info(f"  Pracuj.pl – strona {page} to same znane oferty, zatrzymuję")
+                log.info(f"  Pracuj.pl – same znane oferty, zatrzymuję")
                 break
 
             total_pages = data.get("totalPages", 1)
@@ -391,29 +403,28 @@ def scrape_pracujpl(keyword: str, seen: set) -> list:
 
         except Exception as e:
             log.error(f"Pracuj.pl strona {page} – błąd: {e}")
+            import traceback; log.error(traceback.format_exc())
             break
 
-    log.info(f"Pracuj.pl – łącznie {len(all_jobs)} ofert z {page} stron")
+    log.info(f"Pracuj.pl – łącznie {len(all_jobs)} ofert")
     return all_jobs
-
 
 # ============================================================
 # FILTROWANIE
 # ============================================================
-def filter_jobs(jobs: list) -> list:
+def filter_jobs(jobs):
     filtered = []
     kw = CONFIG["keyword"].lower()
     for j in jobs:
         title_match = kw in j.get("title", "").lower()
-        tech_match = any(kw in t.lower() for t in j.get("technologies", []))
+        tech_match = any(kw in t.lower() for t in j.get("technologies", []) if isinstance(t, str))
         if title_match or tech_match:
             filtered.append(j)
     log.info(f"Po filtracji: {len(filtered)} ofert (było {len(jobs)})")
     return filtered
 
-
 # ============================================================
-# GŁÓWNA LOGIKA
+# MAIN
 # ============================================================
 def run():
     log.info("=" * 60)
@@ -460,7 +471,6 @@ def run():
 
     log.info("=" * 60)
     return new_jobs
-
 
 if __name__ == "__main__":
     run()
